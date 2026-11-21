@@ -1,0 +1,31 @@
+name: scan
+on:
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "yes = market time ke bahar bhi chalao (test)"
+        default: "no"
+permissions:
+  contents: write
+concurrency:
+  group: intraday-state
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: pip install requests beautifulsoup4
+      - run: python scan.py
+        env:
+          TG_TOKEN: ${{ secrets.TG_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          SCAN_CLAUSE: ${{ secrets.SCAN_CLAUSE }}
+          FORCE: ${{ inputs.force || 'no' }}
+      - name: Save state
+        run: |
+          git config user.name "scan-bot"
+          git config user.email "bot@users.noreply.github.com"
+          git add state/seen.json || true
+          git diff --cached --quiet || (git commit -m "state" && git pull --rebase && git push)
