@@ -39,34 +39,41 @@ def rsi(close, n=14):
     rs = gain / loss.replace(0, np.nan)
     return 100 - 100 / (1 + rs)
 
-def tick(ok):
-    return "✅" if ok else "❌"
+def evaluate(df):
+    dates = np.array(df.index.date)
+    prev = sorted(set(dates[dates < dates[-1]]))[-1]
+    p = df[dates == prev]
+    ph, pl, pcl = p["High"].max(), p["Low"].min(), p["Close"].iloc[-1]
+    r1 = 2 * ((ph + pl + pcl) / 3) - pl
+    c = df["Close"]
+    upper = (c.rolling(20).mean() + 2 * c.rolling(20).std(ddof=0)).iloc[-1]
+    last = float(c.iloc[-1])
+    rs = float(rsi(c).iloc[-1])
+    st_up, st_lvl = supertrend(df, 20, 2.0)
+    return dict(t=df.index[-1].strftime("%H:%M"), close=last,
+                st=st_up, st_lvl=st_lvl, rsi=rs, upper=float(upper), r1=float(r1),
+                ok=bool(st_up and rs > 70 and last > upper and last > r1))
 
-out = [f"DEBUG {now:%H:%M:%S} IST"]
+def m(b):
+    return "✅" if b else "❌"
+
+out = [f"DEBUG {now:%H:%M:%S} IST (last 4 completed candles; time = candle start)"]
 for s in SYMS:
     try:
         df = yf.Ticker(s + ".NS").history(period="5d", interval="5m", auto_adjust=False)
         df = df.dropna(subset=["Close", "High", "Low"])
         if now < df.index[-1] + pd.Timedelta(minutes=5):
             df = df.iloc[:-1]
-        dates = np.array(df.index.date)
-        prev = sorted(set(dates[dates < dates[-1]]))[-1]
-        p = df[dates == prev]
-        ph, pl, pcl = p["High"].max(), p["Low"].min(), p["Close"].iloc[-1]
-        pivot = (ph + pl + pcl) / 3
-        r1 = 2 * pivot - pl
-        c = df["Close"]
-        upper = (c.rolling(20).mean() + 2 * c.rolling(20).std(ddof=0)).iloc[-1]
-        last = float(c.iloc[-1])
-        rs = float(rsi(c).iloc[-1])
-        st_up, st_lvl = supertrend(df, 20, 2.0)
-        t = df.index[-1].strftime("%H:%M")
-        out.append(
-            f"\n{s} | candle {t} | close {last:.2f}\n"
-            f"{tick(st_up and last > st_lvl)} Supertrend(20,2): {'up' if st_up else 'down'}, level {st_lvl:.2f}\n"
-            f"{tick(rs > 70)} RSI14: {rs:.1f}\n"
-            f"{tick(last > upper)} Upper BB(20,2): {upper:.2f}\n"
-            f"{tick(last > r1)} Pivot R1: {r1:.2f} (prev day H {ph:.2f} L {pl:.2f} C {pcl:.2f})")
+        out.append(f"\n{s}")
+        for k in range(4, 0, -1):
+            sub = df.iloc[:len(df) - (k - 1)]
+            e = evaluate(sub)
+            out.append(
+                f"{e['t']} close {e['close']:.2f} | ST{m(e['st'] and e['close'] > e['st_lvl'])} "
+                f"RSI {e['rsi']:.1f}{m(e['rsi'] > 70)} "
+                f"BB {e['upper']:.2f}{m(e['close'] > e['upper'])} "
+                f"R1 {e['r1']:.2f}{m(e['close'] > e['r1'])} "
+                f"=> {'MATCH' if e['ok'] else 'no'}")
     except Exception as e:
         out.append(f"\n{s}: error {e}")
 
