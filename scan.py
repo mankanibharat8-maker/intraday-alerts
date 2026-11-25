@@ -1,5 +1,10 @@
-import os, io, json, requests
-import numpy as np, pandas as pd, yfinance as yf
+import os
+import io
+import json
+import requests
+import numpy as np
+import pandas as pd
+import yfinance as yf
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from urllib.parse import quote
@@ -15,15 +20,17 @@ GAP = pd.Timedelta(minutes=5)
 
 now = datetime.now(ZoneInfo("Asia/Kolkata"))
 mins = now.hour * 60 + now.minute
-in_hours = now.weekday() < 5 and (9 * 60 + 20) <= mins <= (15 * 60 + 25)
+in_hours = now.weekday() < 5 and mins >= 560 and mins <= 925
 if not in_hours and not FORCE:
     raise SystemExit
 
+
 def send(msg):
-    r = requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage",
-                      data={"chat_id": CHAT_ID, "text": msg,
-                            "disable_web_page_preview": True})
+    url = "https://api.telegram.org/bot" + TOKEN + "/sendMessage"
+    payload = {"chat_id": CHAT_ID, "text": msg, "disable_web_page_preview": True}
+    r = requests.post(url, data=payload)
     print("TELEGRAM:", r.status_code)
+
 
 def load_symbols():
     try:
@@ -34,37 +41,4 @@ def load_symbols():
         print("Nifty500 list downloaded")
     except Exception as e:
         print("list download failed:", e)
-        if not os.path.exists(LIST_FILE):
-            send(f"⚠️ {LABEL}: Nifty 500 list not available. Upload nifty500.csv to the repo.")
-            raise SystemExit(1)
-        df = pd.read_csv(LIST_FILE)
-        print("using saved list")
-    return [s.strip() for s in df["Symbol"].dropna().tolist()]
-
-def rma(s, n):
-    return s.ewm(alpha=1.0 / n, adjust=False).mean()
-
-def supertrend(df, period, mult):
-    """returns (is_up, supertrend_level)"""
-    h, l, c = df["High"].values, df["Low"].values, df["Close"].values
-    n = len(df)
-    pc = np.roll(c, 1)
-    pc[0] = c[0]
-    tr = np.maximum(h - l, np.maximum(abs(h - pc), abs(l - pc)))
-    atr = rma(pd.Series(tr), period).values
-    up = np.zeros(n)
-    lo = np.zeros(n)
-    d = np.ones(n)
-    for i in range(n):
-        hl2 = (h[i] + l[i]) / 2
-        bu = hl2 + mult * atr[i]
-        bl = hl2 - mult * atr[i]
-        if i == 0:
-            up[i], lo[i] = bu, bl
-            continue
-        lo[i] = bl if (bl > lo[i-1] or c[i-1] < lo[i-1]) else lo[i-1]
-        up[i] = bu if (bu < up[i-1] or c[i-1] > up[i-1]) else up[i-1]
-        if d[i-1] == -1:
-            d[i] = 1 if c[i] > up[i] else -1
-        else:
-            d[i] = -1 if c[i]
+        if not
