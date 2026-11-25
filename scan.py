@@ -11,6 +11,7 @@ LABEL = "Intraday 5min"
 STATE = "state/seen.json"
 LIST_FILE = "nifty500.csv"
 LIST_URL = "https://nsearchives.nseindia.com/content/indices/ind_nifty500list.csv"
+GAP = pd.Timedelta(minutes=5)
 
 now = datetime.now(ZoneInfo("Asia/Kolkata"))
 mins = now.hour * 60 + now.minute
@@ -51,7 +52,9 @@ def supertrend(df, period, mult):
     pc[0] = c[0]
     tr = np.maximum(h - l, np.maximum(abs(h - pc), abs(l - pc)))
     atr = rma(pd.Series(tr), period).values
-    up = np.zeros(n); lo = np.zeros(n); d = np.ones(n)
+    up = np.zeros(n)
+    lo = np.zeros(n)
+    d = np.ones(n)
     for i in range(n):
         hl2 = (h[i] + l[i]) / 2
         bu = hl2 + mult * atr[i]
@@ -64,32 +67,4 @@ def supertrend(df, period, mult):
         if d[i-1] == -1:
             d[i] = 1 if c[i] > up[i] else -1
         else:
-            d[i] = -1 if c[i] < lo[i] else 1
-    is_up = d[-1] == 1
-    return bool(is_up), float(lo[-1] if is_up else up[-1])
-
-def rsi(close, n=14):
-    delta = close.diff()
-    gain = rma(delta.clip(lower=0), n)
-    loss = rma((-delta).clip(lower=0), n)
-    rs = gain / loss.replace(0, np.nan)
-    return 100 - 100 / (1 + rs)
-
-def index_status(sym):
-    """daily Supertrend(10, 1.5) of an index. returns (is_green, close, level) or None"""
-    try:
-        df = yf.Ticker(sym).history(period="1y", auto_adjust=False)
-        df = df.dropna(subset=["Close", "High", "Low"])
-        if len(df) < 30:
-            return None
-        up, lvl = supertrend(df, 10, 1.5)
-        return up, float(df["Close"].iloc[-1]), lvl
-    except Exception as e:
-        print("index error", sym, e)
-        return None
-
-def check(df):
-    df = df.dropna(subset=["Close", "High", "Low"])
-    if len(df) < 60:
-        return None
-    if now < df.index[-1] +
+            d[i] = -1 if c[i]
