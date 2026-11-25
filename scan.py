@@ -1,4 +1,4 @@
-import os, json, requests
+import os, io, json, requests
 import numpy as np, pandas as pd, yfinance as yf
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -9,22 +9,8 @@ CHAT_ID = os.environ["TG_CHAT_ID"].strip()
 FORCE = os.environ.get("FORCE", "no") == "yes"
 LABEL = "Intraday 5min"
 STATE = "state/seen.json"
-
-SYMBOLS = """RELIANCE TCS INFY HDFCBANK ICICIBANK SBIN AXISBANK KOTAKBANK LT ITC
-HINDUNILVR BHARTIARTL MARUTI SUNPHARMA TITAN ULTRACEMCO ASIANPAINT BAJFINANCE
-BAJAJFINSV NTPC POWERGRID ONGC COALINDIA TATASTEEL JSWSTEEL HINDALCO VEDL
-ADANIENT ADANIPORTS WIPRO HCLTECH TECHM LTIM NESTLEIND BRITANNIA DIVISLAB
-DRREDDY CIPLA APOLLOHOSP EICHERMOT HEROMOTOCO BAJAJ-AUTO M&M GRASIM INDUSINDBK
-BPCL IOC GAIL TATAPOWER DLF SIEMENS HAL BEL BHEL PNB BANKBARODA CANBK
-FEDERALBNK IDFCFIRSTB AUBANK SBILIFE HDFCLIFE ICICIGI ICICIPRULI CHOLAFIN
-MUTHOOTFIN PFC RECLTD IRCTC INDIGO TRENT PIDILITIND GODREJCP DABUR MARICO
-COLPAL HAVELLS VOLTAS CUMMINSIND ABB AMBUJACEM SHREECEM BIOCON FORTIS
-JUBLFOOD LUPIN AUROPHARMA ZYDUSLIFE TORNTPHARM ALKEM GLENMARK PERSISTENT
-COFORGE MPHASIS OFSS NAUKRI TVSMOTOR ASHOKLEY BALKRISHIND MRF BOSCHLTD
-MOTHERSON APOLLOTYRE TATACONSUM UPL PIIND SRF DEEPAKNTR NAVINFLUOR TATACHEM
-PETRONET IGL MGL LICHSGFIN MANAPPURAM SHRIRAMFIN SAIL NMDC JINDALSTEL
-NATIONALUM HINDPETRO OIL CONCOR LAURUSLABS ABCAPITAL DIXON KPITTECH
-TATAELXSI CROMPTON BANDHANBNK RBLBANK IEX""".split()
+LIST_FILE = "nifty500.csv"
+LIST_URL = "https://nsearchives.nseindia.com/content/indices/ind_nifty500list.csv"
 
 now = datetime.now(ZoneInfo("Asia/Kolkata"))
 mins = now.hour * 60 + now.minute
@@ -38,10 +24,27 @@ def send(msg):
                             "disable_web_page_preview": True})
     print("TELEGRAM:", r.status_code)
 
+def load_symbols():
+    try:
+        r = requests.get(LIST_URL, headers={"User-Agent": "Mozilla/5.0"}, timeout=20)
+        r.raise_for_status()
+        df = pd.read_csv(io.StringIO(r.text))
+        df.to_csv(LIST_FILE, index=False)
+        print("Nifty500 list downloaded")
+    except Exception as e:
+        print("list download failed:", e)
+        if not os.path.exists(LIST_FILE):
+            send(f"⚠️ {LABEL}: Nifty 500 list not available. Upload nifty500.csv to the repo.")
+            raise SystemExit(1)
+        df = pd.read_csv(LIST_FILE)
+        print("using saved list")
+    return [s.strip() for s in df["Symbol"].dropna().tolist()]
+
 def rma(s, n):
     return s.ewm(alpha=1.0 / n, adjust=False).mean()
 
-def supertrend_up(df, period=20, mult=2.0):
+def supertrend(df, period, mult):
+    """returns (is_up, supertrend_level)"""
     h, l, c = df["High"].values, df["Low"].values, df["Close"].values
     n = len(df)
     pc = np.roll(c, 1)
@@ -62,7 +65,8 @@ def supertrend_up(df, period=20, mult=2.0):
             d[i] = 1 if c[i] > up[i] else -1
         else:
             d[i] = -1 if c[i] < lo[i] else 1
-    return d[-1] == 1
+    is_up = d[-1] == 1
+    return bool(is_up), float(lo[-1] if is_up else up[-1])
 
 def rsi(close, n=14):
     delta = close.diff()
@@ -70,6 +74,19 @@ def rsi(close, n=14):
     loss = rma((-delta).clip(lower=0), n)
     rs = gain / loss.replace(0, np.nan)
     return 100 - 100 / (1 + rs)
+
+def index_status(sym):
+    """daily Supertrend(10, 1.5) of an index. returns (is_green, close, level) or None"""
+    try:
+        df = yf.Ticker(sym).history(period="1y", auto_adjust=False)
+        df = df.dropna(subset=["Close", "High", "Low"])
+        if len(df) < 30:
+            return None
+        up, lvl = supertrend(df, 10, 1.5)
+        return up, float(df["Close"].iloc[-1]), lvl
+    except Exception as e:
+        print("index error", sym, e)
+        return None
 
 def check(df):
     df = df.dropna(subset=["Close", "High", "Low"])
@@ -92,45 +109,102 @@ def check(df):
     upper = (sma + 2 * std).iloc[-1]
     last = c.iloc[-1]
     rsi_v = rsi(c).iloc[-1]
-    ok = (supertrend_up(df) and rsi_v > 70 and last > upper and last > r1)
+    st_up, _ = supertrend(df, 20, 2.0)
+    ok = bool(st_up and rsi_v > 70 and last > upper and last > r1)
     return ok, float(last), float(rsi_v)
 
+# ---------- state ----------
 today = now.strftime("%Y-%m-%d")
-seen = set()
+active, prev_regime = set(), None
 if os.path.exists(STATE):
     try:
         st = json.load(open(STATE))
         if st.get("date") == today:
-            seen = set(st.get("seen", []))
+            active = set(st.get("active", st.get("seen", [])))
+            prev_regime = st.get("regime")
     except Exception:
         pass
 
-tickers = [s + ".NS" for s in SYMBOLS]
-data = yf.download(tickers, period="5d", interval="5m", group_by="ticker",
-                   auto_adjust=False, progress=False, threads=True)
+def save_state(act, regime):
+    os.makedirs("state", exist_ok=True)
+    json.dump({"date": today, "active": sorted(act), "regime": regime},
+              open(STATE, "w"))
 
-hits, failed = [], 0
-for s in SYMBOLS:
+# ---------- index filter: Nifty 50 and Nifty 500 above Supertrend(10, 1.5) ----------
+n50 = index_status("^NSEI")
+n500 = index_status("^CRSLDX")
+
+def fmt(name, s):
+    if s is None:
+        return f"{name}: data unavailable"
+    sign = ">" if s[0] else "<"
+    return f"{name} {s[1]:.0f} {sign} Supertrend {s[2]:.0f}"
+
+status_line = fmt("Nifty50", n50) + "\n" + fmt("Nifty500", n500)
+known = [s for s in (n50, n500) if s is not None]
+any_red = any(not s[0] for s in known)
+all_green = len(known) == 2 and all(s[0] for s in known)
+
+if any_red:
+    regime = "red"
+elif all_green:
+    regime = "green"
+else:
+    regime = "unknown"
+print("REGIME:", regime, "| prev:", prev_regime)
+
+if regime == "red":
+    if prev_regime != "red" or FORCE:
+        send(f"🔴 {LABEL} paused: index below Supertrend(10,1.5), no buy today.\n{status_line}")
+    save_state(set(), "red")  # clear so stocks alert fresh when index turns green
+    raise SystemExit
+
+if regime == "green" and prev_regime == "red":
+    send(f"🟢 {LABEL} resumed: both indexes above Supertrend(10,1.5).\n{status_line}")
+
+if regime == "green":
+    regime_line = "🟢 Nifty50 & Nifty500 above Supertrend(10,1.5)\n"
+else:
+    regime_line = f"⚠️ Index check incomplete, filter not fully applied\n{status_line}\n"
+
+# ---------- stock scan ----------
+SYMBOLS = load_symbols()
+hits, failed_syms = {}, set()
+CH = 100
+for i in range(0, len(SYMBOLS), CH):
+    chunk = SYMBOLS[i:i + CH]
     try:
-        res = check(data[s + ".NS"].copy())
-        if res is None:
-            failed += 1
-        elif res[0]:
-            hits.append((s, res[1], res[2]))
-    except Exception:
-        failed += 1
-print(f"scanned {len(SYMBOLS)}, failed {failed}, matched {len(hits)}")
+        data = yf.download([s + ".NS" for s in chunk], period="5d", interval="5m",
+                           group_by="ticker", auto_adjust=False,
+                           progress=False, threads=True)
+    except Exception as e:
+        print("download error:", e)
+        failed_syms.update(chunk)
+        continue
+    for s in chunk:
+        try:
+            res = check(data[s + ".NS"].copy())
+            if res is None:
+                failed_syms.add(s)
+            elif res[0]:
+                hits[s] = (res[1], res[2])
+        except Exception:
+            failed_syms.add(s)
 
-new = [h for h in hits if h[0] not in seen]
+print(f"scanned {len(SYMBOLS)}, failed {len(failed_syms)}, matching {len(hits)}")
+
+new = [s for s in hits if s not in active]
 if new:
     blocks = []
-    for s, price, r in new:
+    for s in new:
+        price, r = hits[s]
         tv = f"https://in.tradingview.com/chart/?symbol=NSE:{quote(s)}"
         blocks.append(f"{s}: ₹{price:.2f} RSI {r:.0f}\nTradingView: {tv}")
-        seen.add(s)
-    send(f"⚡ {LABEL} {now.strftime('%H:%M')}\n\n" + "\n\n".join(blocks))
-    os.makedirs("state", exist_ok=True)
-    json.dump({"date": today, "seen": sorted(seen)}, open(STATE, "w"))
+    send(f"⚡ {LABEL} {now.strftime('%H:%M')}\n{regime_line}\n" + "\n\n".join(blocks))
 elif FORCE:
-    send(f"⚡ {LABEL}: test OK, scanned {len(SYMBOLS)}, failed {failed}, "
-         f"matched {len(hits)}, new 0")
+    send(f"⚡ {LABEL}: test OK, scanned {len(SYMBOLS)}, failed {len(failed_syms)}, "
+         f"matching now {len(hits)}, new 0\n{regime_line}")
+
+# stocks whose data failed keep their old status, so no false repeat alerts
+new_active = set(hits) | (active & failed_syms)
+save_state(new_active, regime)
